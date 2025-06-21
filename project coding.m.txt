@@ -1,0 +1,105 @@
+clc; clear; close all;
+
+%% Parameters for DC Motor
+J = 0.01; b = 0.1; K = 0.01; R = 1; L = 0.5;
+num = [K];
+den = [L*J, (L*b + R*J), (R*b + K^2)];
+plant = tf(num, den);
+
+%% PID Controller
+Kp = 100; Ki = 200; Kd = 10;
+PID = pid(Kp, Ki, Kd);
+cl_PID = feedback(PID * plant, 1);
+
+%% Fuzzy Logic Controller
+fis = mamfis('Name','FuzzyDC');
+
+% Inputs
+fis = addInput(fis, [-1 1], 'Name', 'Error');
+fis = addMF(fis, 'Error', 'trimf', [-1 -1 0], 'Name', 'N');
+fis = addMF(fis, 'Error', 'trimf', [-1 0 1], 'Name', 'Z');
+fis = addMF(fis, 'Error', 'trimf', [0 1 1], 'Name', 'P');
+
+fis = addInput(fis, [-1 1], 'Name', 'dError');
+fis = addMF(fis, 'dError', 'trimf', [-1 -1 0], 'Name', 'N');
+fis = addMF(fis, 'dError', 'trimf', [-1 0 1], 'Name', 'Z');
+fis = addMF(fis, 'dError', 'trimf', [0 1 1], 'Name', 'P');
+
+% Output
+fis = addOutput(fis, [-20 20], 'Name', 'Control');
+fis = addMF(fis, 'Control', 'trimf', [-20 -10 0], 'Name', 'N');
+fis = addMF(fis, 'Control', 'trimf', [-5 0 5], 'Name', 'Z');
+fis = addMF(fis, 'Control', 'trimf', [0 10 20], 'Name', 'P');
+
+% Rules
+rules = [ ...
+    1 1 1 1 1;
+    1 2 1 1 1;
+    1 3 2 1 1;
+    2 1 1 1 1;
+    2 2 2 1 1;
+    2 3 3 1 1;
+    3 1 2 1 1;
+    3 2 3 1 1;
+    3 3 3 1 1];
+fis = addRule(fis, rules);
+
+%% Simulation settings
+dt = 0.01; T = 3; t = 0:dt:T; N = length(t);
+r = ones(1,N); % Step input
+disturbance = zeros(1,N); disturbance(t >= 1.5) = -0.2;
+
+%% Fuzzy Logic Simulation
+plant_d = c2d(ss(plant), dt);
+x = zeros(size(plant_d.A,1), 1);
+y_fuzzy = zeros(1,N); u_fuzzy = zeros(1,N);
+e = zeros(1,N); de = zeros(1,N);
+Emax = 1; dEmax = 5;
+
+for k = 2:N
+    e(k) = r(k) - y_fuzzy(k-1);
+    de(k) = (e(k) - e(k-1)) / dt;
+
+    norm_e = max(min(e(k)/Emax,1), -1);
+    norm_de = max(min(de(k)/dEmax,1), -1);
+
+    u_fuzzy(k) = 10 * evalfis([norm_e norm_de], fis);
+    u_total = u_fuzzy(k) + disturbance(k);
+
+    x = plant_d.A * x + plant_d.B * u_total;
+    y_fuzzy(k) = plant_d.C * x + plant_d.D * u_total;
+end
+
+%% PID with Disturbance
+[y_pid, t_pid] = step(cl_PID, T); y_pid = y_pid';
+for i = 1:length(t_pid)
+    if t_pid(i) >= 1.5
+        y_pid(i) = y_pid(i) - 0.2;
+    end
+end
+
+%% Plot Responses
+figure;
+plot(t_pid, y_pid, 'r', 'LineWidth', 2); hold on;
+plot(t, y_fuzzy, 'b--', 'LineWidth', 2);
+xlabel('Time (s)'); ylabel('Output');
+title('DC Motor Response: PID vs Fuzzy Logic');
+legend('PID Controller', 'Fuzzy Logic Controller');
+grid on;
+
+%% Performance Evaluation
+info_PID = stepinfo(cl_PID);
+riseTime_Fuzzy = t(find(y_fuzzy >= 0.9, 1)) - t(find(y_fuzzy >= 0.1, 1));
+overshoot_Fuzzy = (max(y_fuzzy) - 1) * 100;
+settle_Fuzzy = t(find(abs(y_fuzzy - 1) < 0.02, 1, 'last'));
+
+fprintf("=== Performance Comparison ===\n");
+fprintf("Metric\t\t\tPID\t\tFuzzy\n");
+fprintf("---------------------------------------------\n");
+fprintf("Rise Time (s)\t\t%.3f\t\t%.3f\n", info_PID.RiseTime, riseTime_Fuzzy);
+fprintf("Overshoot (%%)\t\t%.2f\t\t%.2f\n", info_PID.Overshoot, overshoot_Fuzzy);
+fprintf("Settling Time (s)\t%.3f\t\t%.3f\n", info_PID.SettlingTime, settle_Fuzzy);
+fprintf("Final Value\t\t%.2f\t\t%.2f\n", y_pid(end), y_fuzzy(end));
+fprintf("Disturbance Drop\t%.2f\t\t%.2f\n", ...
+    y_pid(find(t_pid>=1.5,1)) - y_pid(find(t_pid>=1.6,1)), ...
+    y_fuzzy(find(t>=1.5,1)) - y_fuzzy(find(t>=1.6,1)));
